@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""mcp-manage — manage the global mcp-proxy setup."""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+CONFIG_FILE = Path.home() / ".config" / "mcp-proxy" / "servers.json"
+PLIST_FILE = Path.home() / "Library" / "LaunchAgents" / "com.user.mcp-proxy.plist"
+PLIST_LABEL = "com.user.mcp-proxy"
+PORT = 9000
+
+
+def load_config() -> dict:
+    if not CONFIG_FILE.exists():
+        return {"mcpServers": {}}
+    with CONFIG_FILE.open() as f:
+        return json.load(f)
+
+
+def save_config(config: dict) -> None:
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    CONFIG_FILE.chmod(0o600)
+
+
+def cmd_list(args) -> None:
+    config = load_config()
+    servers = config.get("mcpServers", {})
+    if not servers:
+        print("No MCP servers configured.")
+        return
+    print(f"{'NAME':<20} {'COMMAND':<40} SSE URL")
+    print("-" * 90)
+    for name, server in servers.items():
+        command = server.get("command", "")
+        server_args = server.get("args", [])
+        full_cmd = " ".join([command] + server_args)
+        url = f"http://localhost:{PORT}/servers/{name}/sse"
+        print(f"{name:<20} {full_cmd:<40} {url}")
+
+
+def cmd_add(args) -> None:
+    config = load_config()
+    servers = config.setdefault("mcpServers", {})
+
+    if args.name in servers:
+        print(f"Server '{args.name}' already exists. Use 'remove' first if you want to replace it.")
+        sys.exit(1)
+
+    server_entry: dict = {
+        "command": args.command,
+        "args": args.args,
+    }
+
+    # Prompt for env vars
+    env_vars: dict[str, str] = {}
+    print(f"Add environment variables for '{args.name}'? Enter KEY=VALUE pairs, one per line.")
+    print("Press Enter on an empty line when done.")
+    while True:
+        try:
+            line = input("  ENV> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not line:
+            break
+        if "=" not in line:
+            print(f"  Skipping invalid entry: {line!r} (expected KEY=VALUE)")
+            continue
+        key, _, value = line.partition("=")
+        env_vars[key.strip()] = value.strip()
+
+    if env_vars:
+        server_entry["env"] = env_vars
+
+    servers[args.name] = server_entry
+    save_config(config)
+    print(f"Added '{args.name}'.")
+    print(f"SSE URL: http://localhost:{PORT}/servers/{args.name}/sse")
+    print("Run 'mcp-manage reload' to apply.")
+
+
+def cmd_remove(args) -> None:
+    config = load_config()
+    servers = config.get("mcpServers", {})
+    if args.name not in servers:
+        print(f"Server '{args.name}' not found.")
+        sys.exit(1)
+    del servers[args.name]
+    save_config(config)
+    print(f"Removed '{args.name}'. Run 'mcp-manage reload' to apply.")
+
+
+def cmd_reload(args) -> None:
+    config = load_config()
+    servers = config.get("mcpServers", {})
+
+    subprocess.run(["launchctl", "unload", str(PLIST_FILE)], check=False, capture_output=True)
+
+    if not servers:
+        print("No servers configured — service left unloaded.")
+        print("Add a server with 'mcp-manage add', then run 'mcp-manage reload'.")
+        return
+
+    result = subprocess.run(["launchctl", "load", str(PLIST_FILE)], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error loading plist: {result.stderr}")
+        sys.exit(1)
+    print(f"mcp-proxy reloaded with {len(servers)} server(s).")
+    print(f"Status: http://localhost:{PORT}/status")
+
+
+def cmd_snippet(args) -> None:
+    config = load_config()
+    servers = config.get("mcpServers", {})
+    if args.name not in servers:
+        print(f"Server '{args.name}' not found.")
+        sys.exit(1)
+    snippet = {
+        "mcpServers": {
+            args.name: {
+                "type": "sse",
+                "url": f"http://localhost:{PORT}/servers/{args.name}/sse",
+            }
+        }
+    }
+    print(json.dumps(snippet, indent=2))
+
+
+def cmd_status(args) -> None:
+    url = f"http://localhost:{PORT}/status"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            body = resp.read().decode()
+            print(f"Status {resp.status}: {body}")
+    except urllib.error.URLError as e:
+        print(f"Could not reach {url}: {e}")
+        sys.exit(1)
+
+
+def cmd_register(args) -> None:
+    config = load_config()
+    servers = config.get("mcpServers", {})
+    if args.name not in servers:
+        print(f"Server '{args.name}' not found in config. Add it first with 'mcp-manage add'.")
+        sys.exit(1)
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        print("Could not find 'claude' binary in PATH.")
+        sys.exit(1)
+
+    url = f"http://localhost:{PORT}/servers/{args.name}/sse"
+    cmd = [claude_bin, "mcp", "add", "--transport", "sse"]
+    if args.scope:
+        cmd += ["--scope", args.scope]
+    cmd += [args.name, url]
+
+    print(f"Running: {' '.join(cmd)}")
+    subprocess.run(cmd)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Manage the global mcp-proxy setup.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  mcp-manage list
+  mcp-manage add github npx -y @modelcontextprotocol/server-github
+  mcp-manage add filesystem uvx mcp-server-filesystem /Users/rlafferty
+  mcp-manage remove github
+  mcp-manage reload
+  mcp-manage snippet github
+  mcp-manage status
+  mcp-manage register github
+  mcp-manage register github --scope user
+""",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="List all configured MCPs and their SSE URLs")
+
+    add_p = sub.add_parser("add", help="Add a new MCP server")
+    add_p.add_argument("name", help="Name for the server (used in URL path)")
+    add_p.add_argument("command", help="Command to run")
+    add_p.add_argument("args", nargs=argparse.REMAINDER, help="Arguments to the command")
+
+    rm_p = sub.add_parser("remove", help="Remove an MCP server")
+    rm_p.add_argument("name", help="Name of the server to remove")
+
+    sub.add_parser("reload", help="Reload the launchd service")
+
+    snip_p = sub.add_parser("snippet", help="Print JSON snippet for a project's settings")
+    snip_p.add_argument("name", help="Server name")
+
+    sub.add_parser("status", help="Check proxy status endpoint")
+
+    reg_p = sub.add_parser("register", help="Register an MCP's SSE URL with Claude Code via 'claude mcp add'")
+    reg_p.add_argument("name", help="Server name")
+    reg_p.add_argument("--scope", choices=["local", "user", "project"], default=None,
+                       help="Claude Code scope (default: let claude use its own default)")
+
+    args = parser.parse_args()
+    dispatch = {
+        "list": cmd_list,
+        "add": cmd_add,
+        "remove": cmd_remove,
+        "reload": cmd_reload,
+        "snippet": cmd_snippet,
+        "status": cmd_status,
+        "register": cmd_register,
+    }
+    dispatch[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

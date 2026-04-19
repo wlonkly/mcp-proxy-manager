@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.mcp-proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@@MCP_PROXY@@</string>
+        <string>--named-server-config</string>
+        <string>@@HOME@@/.config/mcp-proxy/servers.json</string>
+        <string>--port</string>
+        <string>9000</string>
+        <string>--pass-environment</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>@@PATH@@</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@@HOME@@/.config/mcp-proxy/proxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>@@HOME@@/.config/mcp-proxy/proxy.log</string>
+</dict>
+</plist>
